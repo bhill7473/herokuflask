@@ -1,24 +1,37 @@
 import os
-from flask import Flask, request, jsonify
+import io
+import numpy as np
 
 import keras
 from keras.preprocessing import image
+from keras.preprocessing.image import img_to_array
+from keras.applications.xception import (
+    Xception, preprocess_input, decode_predictions)
 from keras import backend as K
 
+from flask import Flask, request, redirect, url_for, jsonify, render_template
+
+from werkzeug.utils import secure_filename
+
+UPLOAD_FOLDER = 'static'
+ALLOWED_EXTENSIONS = set(['txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'])
+
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'Uploads'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 model = None
 graph = None
 
-# Loading a keras model with flask
-# https://blog.keras.io/building-a-simple-keras-deep-learning-rest-api.html
+#FILE VALIDATION
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def load_model():
     global model
     global graph
-    model = keras.models.load_model("mnist_trained.h5")
+    model = Xception(weights="imagenet")
     graph = K.get_session().graph
 
 
@@ -26,67 +39,70 @@ load_model()
 
 
 def prepare_image(img):
-    # Convert the image to a numpy array
-    img = image.img_to_array(img)
-    # Scale from 0 to 255
-    img /= 255
-    # Invert the pixels
-    img = 1 - img
-    # Flatten the image to an array of pixels
-    image_array = img.flatten().reshape(-1, 28 * 28)
-    # Return the processed feature array
-    return image_array
+    img = img_to_array(img)
+    img = np.expand_dims(img, axis=0)
+    img = preprocess_input(img)
+    # return the processed image
+    return img
 
 
 @app.route('/', methods=['GET', 'POST'])
 def upload_file():
+    display = ""
+    imagefile = ""
     data = {"success": False}
     if request.method == 'POST':
-        print(request)
-
-        if request.files.get('file'):
-            # read the file
-            file = request.files['file']
-
-            # read the filename
-            filename = file.filename
-
+        if 'file' not in request.files:
+            # flash('No file part')
+            return redirect(request.url)
+        file = request.files['file']
+        # if user does not select file, browser also
+        # submit a empty part without filename
+        if file.filename == '':
+        
+            return redirect(request.url)
+        if file and allowed_file(file.filename):
             # create a path to the uploads folder
+            filename = secure_filename(file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
-            # Save the file to the uploads folder
             file.save(filepath)
 
-            # Load the saved image using Keras and resize it to the mnist format of 28x28 pixels
-            image_size = (28, 28)
-            im = image.load_img(filepath, target_size=image_size, grayscale=True)
+            # Load the saved image using Keras and resize it to the Xception
+            # format of 299x299 pixels
+            image_size = (299, 299)
+            im = keras.preprocessing.image.load_img(filepath,
+                                                    target_size=image_size,
+                                                    grayscale=False)
 
-            # Convert the 2D image to an array of pixel values
-            image_array = prepare_image(im)
-            print(image_array)
+            # preprocess the image and prepare it for classification
+            image = prepare_image(im)
+            # imagefile = "Uplaods/"+filename.replace('\\', '/')
+            imagefile= filename
+          
 
-            # Get the tensorflow default graph and use it to make predictions
             global graph
             with graph.as_default():
+                preds = model.predict(image)
+                results = decode_predictions(preds)
+                data["predictions"] = []
 
-                # Use the model to make a prediction
-                predicted_digit = model.predict_classes(image_array)[0]
-                data["prediction"] = str(predicted_digit)
+                # loop over the results and add them to the list of
+                # returned predictions
+                for (imagenetID, label, prob) in results[0]:
+                    r = {"label": label, "probability": float(prob)}
+                    data["predictions"].append(r)
 
                 # indicate that the request was a success
                 data["success"] = True
 
-            return jsonify(data)
-    return '''
-    <!doctype html>
-    <title>Upload new File</title>
-    <h1>Upload new File</h1>
-    <form method=post enctype=multipart/form-data>
-      <p><input type=file name=file>
-         <input type=submit value=Upload>
-    </form>
-    '''
+       
+        
+        display = data["predictions"][0]["label"]
+
+    return render_template("index.html",display=display,imagefile=imagefile)
+
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
